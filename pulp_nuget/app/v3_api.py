@@ -37,6 +37,7 @@ from django.conf import settings
 
 from pulpcore.plugin.models import ContentArtifact
 
+from pulp_nuget.app import pull_through
 from pulp_nuget.app.nuspec import (
     InvalidNupkgError,
     is_semver2,
@@ -146,6 +147,14 @@ def flatcontainer_versions(distribution, package_id_lower):
         .filter(package_id_lower=package_id_lower)
         .values_list("version_normalized", flat=True)
     )
+    if getattr(distribution, "remote_id", None):
+        try:
+            versions = list(
+                set(versions) | set(pull_through.versions(distribution, package_id_lower))
+            )
+        except (web.HTTPBadGateway, OSError, TimeoutError):
+            if not versions:
+                raise
     if not versions:
         return None
     versions.sort(key=version_sort_key)
@@ -163,8 +172,9 @@ def get_package_artifact(distribution, package_id_lower, version, filename):
         .first()
     )
     if package is None:
-        return None
-    return ContentArtifact.objects.select_related("artifact").filter(content=package).first()
+        return pull_through.artifact(distribution, package_id_lower, version, filename)
+    ca = ContentArtifact.objects.select_related("artifact").filter(content=package).first()
+    return ca
 
 
 def get_symbol_packages(distribution):
@@ -359,6 +369,8 @@ def _catalog_entry(package, base):
         "title": package.title,
         "version": package.version_normalized,
     }
+    if getattr(package, "published", None):
+        entry["published"] = package.published.isoformat()
     return entry
 
 
@@ -376,10 +388,23 @@ def _registration_leaf(package, base):
 
 
 def _sorted_packages(distribution, package_id_lower):
-    return sorted(
-        get_packages(distribution).filter(package_id_lower=package_id_lower),
-        key=lambda package: version_sort_key(package.version_normalized),
-    )
+    local = list(get_packages(distribution).filter(package_id_lower=package_id_lower))
+    combined = {}
+    if getattr(distribution, "remote_id", None):
+        try:
+            combined = {
+                p.version_normalized: p
+                for p in pull_through.packages(distribution, package_id_lower)
+            }
+        except (web.HTTPBadGateway, OSError, TimeoutError):
+            if not local:
+                raise
+    for package in local:
+        upstream = combined.get(package.version_normalized)
+        if upstream and not getattr(package, "published", None):
+            package.published = upstream.published
+        combined[package.version_normalized] = package
+    return sorted(combined.values(), key=lambda p: version_sort_key(p.version_normalized))
 
 
 def _page_chunks(packages, page_size):
@@ -461,15 +486,16 @@ def registration_page(distribution, package_id_lower, lower, upper):
 
 
 def registration_leaf(distribution, package_id_lower, version):
-    """The v3/registrations/{id}/{version}.json resource, or None."""
-    package = (
-        get_packages(distribution)
-        .filter(package_id_lower=package_id_lower, version_normalized=version.lower())
-        .first()
+    """The local or upstream registration leaf, always with Pulp download URLs."""
+    package = next(
+        (
+            p
+            for p in _sorted_packages(distribution, package_id_lower)
+            if p.version_normalized == version.lower()
+        ),
+        None,
     )
-    if package is None:
-        return None
-    return _registration_leaf(package, base_url(distribution))
+    return _registration_leaf(package, base_url(distribution)) if package else None
 
 
 def _split_tags(tags):
@@ -573,8 +599,15 @@ def handle(distribution, path):
                 distribution, package_id_lower, match["version"], match["filename"]
             )
         elif match["filename"].lower().endswith(".nuspec"):
-            return get_package_nuspec(
+            local = get_package_nuspec(
                 distribution, package_id_lower, match["version"], match["filename"]
+            )
+            return (
+                local
+                if local is not None
+                else pull_through.manifest(
+                    distribution, package_id_lower, match["version"], match["filename"]
+                )
             )
         elif match["filename"].lower().endswith(".snupkg"):
             content_artifact = get_symbol_package_artifact(

@@ -7,11 +7,13 @@ content_handler does not receive — so search is registered as an explicit rout
 This module is auto-imported by the pulpcore content app on startup.
 """
 
+import re
+
 from aiohttp import web
 from asgiref.sync import sync_to_async
 from django.conf import settings
 
-from pulpcore.plugin.content import app
+from pulpcore.plugin.content import Handler, app
 
 from pulp_nuget.app import v3_api
 from pulp_nuget.app.models import NugetDistribution
@@ -61,3 +63,46 @@ async def search(request):
 
 
 app.add_routes([web.get(settings.CONTENT_PATH_PREFIX + "{path:.+}/v3/search", search)])
+
+
+# These resources depend on live upstream state, not only repository changes.
+# Pulp's outer response cache does not include query strings or remote settings
+# in its key. Serve NuGet metadata ahead of that cache, retaining our bounded
+# upstream metadata cache and the same distribution content-guard check.
+_METADATA_PATH = re.compile(
+    r"^(?P<path>.+)/(?P<resource>v3/index\.json|v3-flatcontainer/[^/]+/index\.json|v3/registrations/.+)$"
+)
+
+
+def _metadata_response(path, resource, request):
+    kwargs = {"base_path": path}
+    if settings.DOMAIN_ENABLED:
+        domain_name, _, base_path = path.partition("/")
+        kwargs = {"pulp_domain__name": domain_name, "base_path": base_path}
+    try:
+        distribution = NugetDistribution.objects.select_related("content_guard").get(**kwargs)
+    except NugetDistribution.DoesNotExist:
+        return None
+    Handler._permit(request, distribution)
+    response = v3_api.handle(distribution, resource)
+    if response is None:
+        raise web.HTTPNotFound()
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@web.middleware
+async def live_metadata(request, handler):
+    prefix = settings.CONTENT_PATH_PREFIX
+    if request.method in ("GET", "HEAD") and request.path.startswith(prefix):
+        match = _METADATA_PATH.fullmatch(request.path[len(prefix) :])
+        if match:
+            response = await sync_to_async(_metadata_response)(
+                match["path"], match["resource"], request
+            )
+            if response is not None:
+                return response
+    return await handler(request)
+
+
+app.middlewares.append(live_metadata)

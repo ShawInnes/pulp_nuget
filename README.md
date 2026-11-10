@@ -122,3 +122,39 @@ How to File an Issue
 File through this project's GitHub issues and appropriate labels.
 
 > **WARNING** Is this security related? If so, please follow the [Security Disclosures](https://docs.pulpproject.org/pulpcore/bugs-features.html#security-bugs) procedure.
+
+
+## Pull-through caching
+
+A distribution with a `remote` transparently discovers package IDs from an upstream
+NuGet v3 feed without a prior sync. Create an `on_demand` remote with `includes=[]`
+for unrestricted lazy discovery (or use explicit ID/version filters), then create
+a distribution with that remote and a live NuGet repository:
+
+```sh
+http --auth admin:password POST :8080/pulp/api/v3/remotes/nuget/nuget/ \
+    name=nuget-cache url=https://api.nuget.org/v3/index.json policy=on_demand includes:='[]'
+http --auth admin:password POST :8080/pulp/api/v3/distributions/nuget/nuget/ \
+    name=nuget-cache base_path=nuget-cache remote=<remote_href> repository=<repository_href>
+```
+
+Point clients at `<base_url>/v3/index.json`. Exact package-ID lookups discover
+upstream versions and registration pages lazily; binary downloads use Pulp's
+remote authentication, TLS/proxy settings, streaming and persistent artifact storage.
+Each requested package version is recorded in the linked repository; metadata-only
+entries have no artifact until downloaded. Dependencies requested by NuGet clients
+use the same fallback. Downloading one `.nupkg` does not recursively download its
+dependencies. Existing sync, push and repository-only distributions continue working.
+
+Metadata is cached for 300 seconds (`NUGET_METADATA_CACHE_TTL` in Pulp settings),
+with 30-second negative caching. Stored binaries are served without contacting the
+upstream feed. Known local metadata remains available if upstream discovery fails.
+Fixed repository-version distributions cannot enable a remote. A distribution
+without a linked repository can download/cache files, but cannot provide scoped
+inventory until a repository is linked and the file is requested again.
+
+Registrations preserve upstream publication times when available. Unlisted
+nuget.org year-1900 timestamps are treated as unknown. Package content API responses
+include `size` from the stored artifact, or null for metadata-only content. Search
+continues to browse repository content; exact-ID lookup is the upstream discovery
+interface. Local repository retention settings apply to newly cached versions.

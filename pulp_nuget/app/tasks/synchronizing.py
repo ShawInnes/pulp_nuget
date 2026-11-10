@@ -354,6 +354,9 @@ class NugetFirstStage(Stage):
                     entry = leaf["catalogEntry"]
                     if not self._wanted(package_id, entry["version"]):
                         continue
+                    from pulp_nuget.app.pull_through import package_from_entry
+
+                    published = package_from_entry(entry).published
                     package = NugetPackageContent(
                         package_id=entry["id"],
                         package_id_lower=entry["id"].lower(),
@@ -374,6 +377,7 @@ class NugetFirstStage(Stage):
                         # catalogEntry has no packageTypes, so synced content keeps the
                         # default [] (implicit Dependency). Missing "listed" means listed.
                         listed=entry.get("listed") is not False,
+                        published=published,
                     )
                     url = leaf.get("packageContent") or entry.get("packageContent")
                     if not url:

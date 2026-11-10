@@ -57,6 +57,13 @@ class NugetPackageSerializer(
         read_only=True,
     )
 
+    published = serializers.DateTimeField(read_only=True, allow_null=True)
+    size = serializers.SerializerMethodField()
+
+    def get_size(self, instance):
+        artifact = next(iter(instance._artifacts.all()), None)
+        return artifact.size if artifact else None
+
     def deferred_validate(self, data):
         """Parse the .nuspec metadata out of the artifact."""
         data = super().deferred_validate(data)
@@ -120,6 +127,8 @@ class NugetPackageSerializer(
                 "dependency_groups",
                 "package_types",
                 "listed",
+                "published",
+                "size",
             )
         )
 
@@ -351,6 +360,28 @@ class NugetDistributionSerializer(platform.DistributionSerializer):
     available at ``<base_url>/v3/index.json``.
     """
 
+    remote = platform.DetailRelatedField(
+        required=False,
+        allow_null=True,
+        queryset=models.NugetRemote.objects.all(),
+        view_name_pattern="remotes(-.*/.*)?-detail",
+        help_text=_("Upstream NuGet v3 feed used for pull-through package discovery and caching."),
+    )
+
+    def validate(self, data):
+        data = super().validate(data)
+        remote = data.get("remote", getattr(self.instance, "remote", None))
+        repository_version = data.get(
+            "repository_version", getattr(self.instance, "repository_version", None)
+        )
+        if remote and repository_version:
+            raise serializers.ValidationError(
+                _(
+                    "Pull-through caching requires a live repository, not a fixed repository version."
+                )
+            )
+        return data
+
     class Meta:
-        fields = platform.DistributionSerializer.Meta.fields
+        fields = platform.DistributionSerializer.Meta.fields + ("remote",)
         model = models.NugetDistribution

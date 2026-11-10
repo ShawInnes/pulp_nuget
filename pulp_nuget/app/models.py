@@ -82,6 +82,7 @@ class NugetPackageContent(Content):
     # Unlisted packages stay downloadable by exact version but are hidden from search
     # and marked listed=false in registrations. Mutable; global per content unit.
     listed = models.BooleanField(default=True)
+    published = models.DateTimeField(null=True, blank=True)
 
     _pulp_domain = models.ForeignKey("core.Domain", default=get_domain_pk, on_delete=models.PROTECT)
 
@@ -174,6 +175,7 @@ class NugetRepository(Repository, AutoAddObjPermsMixin):
 
     CONTENT_TYPES = [NugetPackageContent, NugetSymbolPackageContent]
     REMOTE_TYPES = [NugetRemote]
+    PULL_THROUGH_SUPPORTED = True
 
     # State of the last sync, used to skip syncs when nothing changed (like pulp_file).
     last_sync_details = models.JSONField(default=dict)
